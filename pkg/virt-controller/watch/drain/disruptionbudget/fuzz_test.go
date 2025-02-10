@@ -137,7 +137,7 @@ func FuzzExecute(f *testing.F) {
 
 		// Add the resources to the context
 		for _, vmi := range vmis {
-			vmiFeeder.Add(vmi)
+			go vmiFeeder.Add(vmi)
 		}
 		for _, vmiMigration := range vmiMigrations {
 			err := vmimInformer.GetIndexer().Add(vmiMigration)
