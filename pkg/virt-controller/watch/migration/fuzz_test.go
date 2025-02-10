@@ -1,21 +1,24 @@
 package migration
 
 import (
+	"context"
 	"testing"
 
 	gfh "github.com/AdaLogics/go-fuzz-headers"
 	"github.com/golang/mock/gomock"
-	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	k8sfake "k8s.io/client-go/kubernetes/fake"
-	k8sTesting "k8s.io/client-go/testing"
-	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	kubevirtfake "kubevirt.io/client-go/kubevirt/fake"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
-	poolv1 "kubevirt.io/api/pool/v1alpha1"
+	migrationsv1 "kubevirt.io/api/migrations/v1alpha1"
+	"k8s.io/client-go/kubernetes/fake"
+	k8sv1 "k8s.io/api/core/v1"
+	fakenetworkclient "kubevirt.io/client-go/networkattachmentdefinitionclient/fake"
+	storagev1 "k8s.io/api/storage/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	"kubevirt.io/kubevirt/pkg/virt-controller/services"	
+	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
 
 	virtcontroller "kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/testutils"
@@ -23,6 +26,7 @@ import (
 
 var (
 	maxResources = 3
+	qemuGid int64 = 107
 )
 
 // FuzzExecute add up to 3 XXXXXXXXXXXXXXX
@@ -46,9 +50,9 @@ func FuzzExecute(f *testing.F) {
 			vmis = append(vmis, vmi)
 		}
 
-		vmiMigrations := make([]*virtv1.VirtualMachineInstanceMigration, 0)
+		vmiMigrations := make([]*v1.VirtualMachineInstanceMigration, 0)
 		for _ = range int(numberOfVMIMigrations) % maxResources {
-			vmiMigration := &virtv1.VirtualMachineInstanceMigration{}
+			vmiMigration := &v1.VirtualMachineInstanceMigration{}
 			err := fdp.GenerateStruct(vmiMigration)
 			if err != nil {
 				return
@@ -86,17 +90,17 @@ func FuzzExecute(f *testing.F) {
 			mps = append(mps, pdb)
 		}
 
-		virtClient := kubecli.NewMockKubevirtClient(gomock.NewController(GinkgoT()))
-		virtClientset = kubevirtfake.NewSimpleClientset()
+		virtClient := kubecli.NewMockKubevirtClient(gomock.NewController(t))
+		virtClientset := kubevirtfake.NewSimpleClientset()
 
-		vmiInformer, _ := testutils.NewFakeInformerFor(&virtv1.VirtualMachineInstance{})
-		migrationInformer, _ := testutils.NewFakeInformerFor(&virtv1.VirtualMachineInstanceMigration{})
+		vmiInformer, _ := testutils.NewFakeInformerFor(&v1.VirtualMachineInstance{})
+		migrationInformer, _ := testutils.NewFakeInformerFor(&v1.VirtualMachineInstanceMigration{})
 		podInformer, _ := testutils.NewFakeInformerFor(&k8sv1.Pod{})
 		pdbInformer, _ := testutils.NewFakeInformerFor(&policyv1.PodDisruptionBudget{})
 		resourceQuotaInformer, _ := testutils.NewFakeInformerFor(&k8sv1.ResourceQuota{})
 		namespaceInformer, _ := testutils.NewFakeInformerFor(&k8sv1.Namespace{})
 		migrationPolicyInformer, _ := testutils.NewFakeInformerFor(&migrationsv1.MigrationPolicy{})
-		recorder = record.NewFakeRecorder(100)
+		recorder := record.NewFakeRecorder(100)
 		recorder.IncludeObject = true
 		nodeInformer, _ := testutils.NewFakeInformerFor(&k8sv1.Node{})
 
@@ -104,8 +108,8 @@ func FuzzExecute(f *testing.F) {
 		storageClassInformer, _ := testutils.NewFakeInformerFor(&storagev1.StorageClass{})
 		storageProfileInformer, _ := testutils.NewFakeInformerFor(&cdiv1.StorageProfile{})
 
-		config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&virtv1.KubeVirtConfiguration{})
-		controller, _ = NewController(
+		config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{})
+		controller, _ := NewController(
 			services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", pvcInformer.GetStore(), virtClient, config, qemuGid, "g", resourceQuotaInformer.GetStore(), namespaceInformer.GetStore()),
 			vmiInformer,
 			podInformer,
@@ -122,16 +126,16 @@ func FuzzExecute(f *testing.F) {
 			config,
 		)
 		// Wrap our workqueue to have a way to detect when we are done processing updates
-		mockQueue = testutils.NewMockWorkQueue(controller.Queue)
+		mockQueue := testutils.NewMockWorkQueue(controller.Queue)
 		controller.Queue = mockQueue
 
 		// Set up mock client
-		kubeClient = fake.NewSimpleClientset()
+		kubeClient := fake.NewSimpleClientset()
 		virtClient.EXPECT().VirtualMachineInstanceMigration(k8sv1.NamespaceDefault).Return(virtClientset.KubevirtV1().VirtualMachineInstanceMigrations(k8sv1.NamespaceDefault)).AnyTimes()
 		virtClient.EXPECT().VirtualMachineInstance(k8sv1.NamespaceDefault).Return(virtClientset.KubevirtV1().VirtualMachineInstances(k8sv1.NamespaceDefault)).AnyTimes()
 		virtClient.EXPECT().CoreV1().Return(kubeClient.CoreV1()).AnyTimes()
 		virtClient.EXPECT().PolicyV1().Return(kubeClient.PolicyV1()).AnyTimes()
-		networkClient = fakenetworkclient.NewSimpleClientset()
+		networkClient := fakenetworkclient.NewSimpleClientset()
 		virtClient.EXPECT().NetworkClient().Return(networkClient).AnyTimes()
 		virtClient.EXPECT().MigrationPolicy().Return(virtClientset.MigrationsV1alpha1().MigrationPolicies()).AnyTimes()
 
