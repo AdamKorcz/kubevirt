@@ -157,7 +157,6 @@ func FuzzExecute(f *testing.F) {
 		if controller.Queue.Len() == 0 {
 			return
 		}
-		panic("Here")
 
 		// Run the controller
 		controller.Execute()
