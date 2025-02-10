@@ -12,6 +12,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/kubernetes/fake"
 	corev1 "k8s.io/api/core/v1"
+	k8sv1 "k8s.io/api/core/v1"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
@@ -29,7 +30,9 @@ var (
 func FuzzExecute(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte,
 							  numberOfVMIs,
-							  numberOfVMIMigrations uint8) {
+							  numberOfVMIMigrations,
+							  numberOfPods,
+							  numberOfPDBs uint8) {
 		fdp := gfh.NewConsumer(data)
 
 		vmis := make([]*v1.VirtualMachineInstance, 0)
@@ -42,6 +45,16 @@ func FuzzExecute(f *testing.F) {
 			vmis = append(vmis, vmi)
 		}
 
+		pods := make([]*k8sv1.Pod, 0)
+		for _ = range int(numberOfPods) % maxResources {
+			pod := &k8sv1.Pod{}
+			err := fdp.GenerateStruct(pod)
+			if err != nil {
+				return
+			}
+			pods = append(pods, pod)
+		}
+
 		vmiMigrations := make([]*v1.VirtualMachineInstanceMigration, 0)
 		for _ = range int(numberOfVMIMigrations) % maxResources {
 			vmiMigration := &v1.VirtualMachineInstanceMigration{}
@@ -50,6 +63,19 @@ func FuzzExecute(f *testing.F) {
 				return
 			}
 			vmiMigrations = append(vmiMigrations, vmiMigration)
+		}
+
+		pdbs := make([]*policyv1.PodDisruptionBudget, 0)
+		for _ = range int(numberOfPDBs) % maxResources {
+			pdb := &policyv1.PodDisruptionBudget{}
+			err := fdp.GenerateStruct(pdb)
+			if err != nil {
+				return
+			}
+			pdbs = append(pdbs, pdb)
+		}
+		if len(vmis) + len(pods) + len(vmiMigrations) + len(pdbs) < 3 {
+			return
 		}
 
 		var vmiInformer cache.SharedIndexInformer
@@ -81,6 +107,7 @@ func FuzzExecute(f *testing.F) {
 
 
 		stop := make(chan struct{})
+		defer close(stop)
 		ctrl := gomock.NewController(t)
 		virtClient = kubecli.NewMockKubevirtClient(ctrl)
 		vmiInformer, vmiSource = testutils.NewFakeInformerFor(&v1.VirtualMachineInstance{})
@@ -110,9 +137,7 @@ func FuzzExecute(f *testing.F) {
 
 		// Add the resources to the context
 		for _, vmi := range vmis {
-			mockQueue.ExpectAdds(1)
-			vmiSource.Add(vmi)
-			mockQueue.Wait()
+			vmiFeeder.Add(vmi)
 		}
 		for _, vmiMigration := range vmiMigrations {
 			err := vmimInformer.GetIndexer().Add(vmiMigration)
@@ -120,7 +145,16 @@ func FuzzExecute(f *testing.F) {
 				return
 			}
 		}
-		if mockQueue.Len() == 0 {
+		for _, pod := range pods {
+			err := podInformer.GetIndexer().Add(pod)
+			if err != nil {
+				return
+			}
+		}
+		for _, pdb := range pdbs {
+			go pdbFeeder.Add(pdb)
+		}
+		if controller.Queue.Len() == 0 {
 			return
 		}
 		panic("Here")
