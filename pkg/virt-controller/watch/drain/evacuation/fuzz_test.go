@@ -73,6 +73,7 @@ func FuzzExecute(f *testing.F) {
 		}
 
 		stop := make(chan struct{})
+		defer close(stop)
 		ctrl := gomock.NewController(t)
 		virtClient := kubecli.NewMockKubevirtClient(ctrl)
 		fakeVirtClient := kubevirtfake.NewSimpleClientset()
@@ -125,18 +126,24 @@ func FuzzExecute(f *testing.F) {
 
 		// Add the resources to the context
 		for _, vmi := range vmis {
-			vmiFeeder.Add(vmi)
+			go vmiFeeder.Add(vmi)
 		}
 		for _, node := range nodes {
-			mockQueue.ExpectAdds(1)
-			nodeSource.Add(node)
-			mockQueue.Wait()
+			go func() {
+				mockQueue.ExpectAdds(1)
+				nodeSource.Add(node)
+				mockQueue.Wait()
+			}()
 		}
 		for _, pod := range pods {
-			podSource.Add(pod)
+			go func() {
+				mockQueue.ExpectAdds(1)
+				podSource.Add(pod)
+				mockQueue.Wait()
+			}()
 		}
 		for _, migration := range migrations {
-			migrationFeeder.Add(migration)
+			go migrationFeeder.Add(migration)
 		}
 
 		// Run the controller
