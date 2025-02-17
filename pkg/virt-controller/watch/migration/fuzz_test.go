@@ -1,43 +1,86 @@
 package migration
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	stdruntime "runtime"
 	"testing"
 
 	gfh "github.com/AdaLogics/go-fuzz-headers"
 	"github.com/golang/mock/gomock"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/record"
-	kubevirtfake "kubevirt.io/client-go/kubevirt/fake"
-	v1 "kubevirt.io/api/core/v1"
-	"kubevirt.io/client-go/kubecli"
-	migrationsv1 "kubevirt.io/api/migrations/v1alpha1"
-	"k8s.io/client-go/kubernetes/fake"
 	k8sv1 "k8s.io/api/core/v1"
-	fakenetworkclient "kubevirt.io/client-go/networkattachmentdefinitionclient/fake"
-	storagev1 "k8s.io/api/storage/v1"
 	policyv1 "k8s.io/api/policy/v1"
-	"kubevirt.io/kubevirt/pkg/virt-controller/services"	
+	storagev1 "k8s.io/api/storage/v1"
+	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/cache"
+	framework "k8s.io/client-go/tools/cache/testing"
+	"k8s.io/client-go/tools/record"
+	v1 "kubevirt.io/api/core/v1"
+	migrationsv1 "kubevirt.io/api/migrations/v1alpha1"
+	"kubevirt.io/client-go/kubecli"
+	kubevirtfake "kubevirt.io/client-go/kubevirt/fake"
+	"kubevirt.io/client-go/log"
+	fakenetworkclient "kubevirt.io/client-go/networkattachmentdefinitionclient/fake"
 	cdiv1 "kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1"
+
+	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	"kubevirt.io/kubevirt/pkg/virt-controller/services"
 
 	virtcontroller "kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/testutils"
 )
 
 var (
-	maxResources = 3
-	qemuGid int64 = 107
+	maxResources            = 3
+	qemuGid           int64 = 107
+	kvObjectNamespace       = "kubevirt"
+	kvObjectName            = "kubevirt"
 )
+
+func NewFakeClusterConfigUsingKV(kv *v1.KubeVirt) (*virtconfig.ClusterConfig, cache.SharedIndexInformer, cache.Store, *framework.FakeControllerSource, *framework.FakeControllerSource) {
+	return NewFakeClusterConfigUsingKVWithCPUArch(kv, stdruntime.GOARCH)
+}
+
+func NewFakeClusterConfigUsingKVWithCPUArch(kv *v1.KubeVirt, CPUArch string) (*virtconfig.ClusterConfig, cache.SharedIndexInformer, cache.Store, *framework.FakeControllerSource, *framework.FakeControllerSource) {
+	kv.ResourceVersion = rand.String(10)
+	kv.Status.Phase = "Deployed"
+	crdInformer, cs1 := testutils.NewFakeInformerFor(&extv1.CustomResourceDefinition{})
+	kubeVirtInformer, cs2 := testutils.NewFakeInformerFor(&v1.KubeVirt{})
+
+	kubeVirtInformer.GetStore().Add(kv)
+
+	AddDataVolumeAPI(crdInformer)
+	cfg, _ := virtconfig.NewClusterConfigWithCPUArch(crdInformer, kubeVirtInformer, kvObjectNamespace, CPUArch)
+	return cfg, crdInformer, kubeVirtInformer.GetStore(), cs1, cs2
+}
+
+func AddDataVolumeAPI(crdInformer cache.SharedIndexInformer) {
+	crdInformer.GetStore().Add(&extv1.CustomResourceDefinition{
+		Spec: extv1.CustomResourceDefinitionSpec{
+			Names: extv1.CustomResourceDefinitionNames{
+				Kind: "DataVolume",
+			},
+		},
+	})
+}
+
+func NewFakeClusterConfigUsingKVConfig(kv *v1.KubeVirt) (*virtconfig.ClusterConfig, cache.SharedIndexInformer, cache.Store, *framework.FakeControllerSource, *framework.FakeControllerSource) {
+	return NewFakeClusterConfigUsingKV(kv)
+}
 
 // FuzzExecute add up to 3 XXXXXXXXXXXXXXX
 // to the context and then runs the controller.
 func FuzzExecute(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte,
-							  numberOfVMIs,
-							  numberOfVMIMigrations,
-							  numberOfNodes,
-							  numberOfPDBs,
-							  numberOfMPs uint8) {
+		numberOfVMIs,
+		numberOfVMIMigrations,
+		numberOfNodes,
+		numberOfPDBs,
+		numberOfMPs uint8) {
 		fdp := gfh.NewConsumer(data)
 
 		vmis := make([]*v1.VirtualMachineInstance, 0)
@@ -90,25 +133,65 @@ func FuzzExecute(f *testing.F) {
 			mps = append(mps, pdb)
 		}
 
+		// ignore logs
+		var b bytes.Buffer
+		log.Log.SetIOWriter(bufio.NewWriter(&b))
+
 		virtClient := kubecli.NewMockKubevirtClient(gomock.NewController(t))
 		virtClientset := kubevirtfake.NewSimpleClientset()
 
-		vmiInformer, _ := testutils.NewFakeInformerFor(&v1.VirtualMachineInstance{})
-		migrationInformer, _ := testutils.NewFakeInformerFor(&v1.VirtualMachineInstanceMigration{})
-		podInformer, _ := testutils.NewFakeInformerFor(&k8sv1.Pod{})
-		pdbInformer, _ := testutils.NewFakeInformerFor(&policyv1.PodDisruptionBudget{})
-		resourceQuotaInformer, _ := testutils.NewFakeInformerFor(&k8sv1.ResourceQuota{})
-		namespaceInformer, _ := testutils.NewFakeInformerFor(&k8sv1.Namespace{})
-		migrationPolicyInformer, _ := testutils.NewFakeInformerFor(&migrationsv1.MigrationPolicy{})
+		vmiInformer, vmiCs := testutils.NewFakeInformerFor(&v1.VirtualMachineInstance{})
+		migrationInformer, migrationCs := testutils.NewFakeInformerFor(&v1.VirtualMachineInstanceMigration{})
+		podInformer, podCs := testutils.NewFakeInformerFor(&k8sv1.Pod{})
+		pdbInformer, pdbCs := testutils.NewFakeInformerFor(&policyv1.PodDisruptionBudget{})
+		resourceQuotaInformer, resourceQuotaCs := testutils.NewFakeInformerFor(&k8sv1.ResourceQuota{})
+		namespaceInformer, nsCs := testutils.NewFakeInformerFor(&k8sv1.Namespace{})
+		migrationPolicyInformer, migrationPolicyCs := testutils.NewFakeInformerFor(&migrationsv1.MigrationPolicy{})
+		nodeInformer, nodeCs := testutils.NewFakeInformerFor(&k8sv1.Node{})
+		pvcInformer, pvcCs := testutils.NewFakeInformerFor(&k8sv1.PersistentVolumeClaim{})
+		storageClassInformer, storageClassCs := testutils.NewFakeInformerFor(&storagev1.StorageClass{})
+		storageProfileInformer, storageProfileCs := testutils.NewFakeInformerFor(&cdiv1.StorageProfile{})
+		defer vmiCs.Shutdown()
+		defer migrationCs.Shutdown()
+		defer podCs.Shutdown()
+		defer pdbCs.Shutdown()
+		defer resourceQuotaCs.Shutdown()
+		defer nsCs.Shutdown()
+		defer migrationPolicyCs.Shutdown()
+		defer nodeCs.Shutdown()
+		defer pvcCs.Shutdown()
+		defer storageClassCs.Shutdown()
+		defer storageProfileCs.Shutdown()
+
 		recorder := record.NewFakeRecorder(100)
 		recorder.IncludeObject = true
-		nodeInformer, _ := testutils.NewFakeInformerFor(&k8sv1.Node{})
 
-		pvcInformer, _ := testutils.NewFakeInformerFor(&k8sv1.PersistentVolumeClaim{})
-		storageClassInformer, _ := testutils.NewFakeInformerFor(&storagev1.StorageClass{})
-		storageProfileInformer, _ := testutils.NewFakeInformerFor(&cdiv1.StorageProfile{})
+		kv := &v1.KubeVirt{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      kvObjectName,
+				Namespace: kvObjectNamespace,
+			},
+			Spec: v1.KubeVirtSpec{
+				Configuration: v1.KubeVirtConfiguration{},
+			},
+			Status: v1.KubeVirtStatus{
+				DefaultArchitecture: stdruntime.GOARCH,
+				Phase:               "Deployed",
+			},
+		}
 
-		config, _, _ := testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{})
+		config, crdInformer, kubeVirtInformerStore, cs1, cs2 := NewFakeClusterConfigUsingKVConfig(kv)
+		defer cs1.Shutdown()
+		defer cs2.Shutdown()
+		defer kubeVirtInformerStore.Delete(kv)
+		defer func() {
+			for _, obj := range crdInformer.GetStore().List() {
+				err := crdInformer.GetStore().Delete(obj)
+				if err != nil {
+					panic(err)
+				}
+			}
+		}()
 		controller, _ := NewController(
 			services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", pvcInformer.GetStore(), virtClient, config, qemuGid, "g", resourceQuotaInformer.GetStore(), namespaceInformer.GetStore()),
 			vmiInformer,
@@ -127,6 +210,7 @@ func FuzzExecute(f *testing.F) {
 		)
 		// Wrap our workqueue to have a way to detect when we are done processing updates
 		mockQueue := testutils.NewMockWorkQueue(controller.Queue)
+		controller.Queue.ShutDown()
 		controller.Queue = mockQueue
 
 		// Set up mock client
@@ -139,7 +223,6 @@ func FuzzExecute(f *testing.F) {
 		virtClient.EXPECT().NetworkClient().Return(networkClient).AnyTimes()
 		virtClient.EXPECT().MigrationPolicy().Return(virtClientset.MigrationsV1alpha1().MigrationPolicies()).AnyTimes()
 
-
 		// Add the resources to the context
 		for _, vmi := range vmis {
 			if len(vmi.Annotations) == 0 {
@@ -148,27 +231,41 @@ func FuzzExecute(f *testing.F) {
 			if len(vmi.Labels) == 0 {
 				vmi.Labels = nil
 			}
-			controller.vmiStore.Add(vmi)
-			key, err := virtcontroller.KeyFunc(vmi)
+			addToQueue, err := fdp.GetBool()
 			if err != nil {
 				return
 			}
-			mockQueue.Add(key)
-			_, err = virtClientset.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Create(context.Background(), vmi, metav1.CreateOptions{})
-			if err != nil {
-				return
+			if addToQueue {
+				controller.vmiStore.Add(vmi)
+				key, err := virtcontroller.KeyFunc(vmi)
+				if err != nil {
+					return
+				}
+				mockQueue.Add(key)
+			} else {
+				_, err = virtClientset.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Create(context.Background(), vmi, metav1.CreateOptions{})
+				if err != nil {
+					return
+				}
 			}
 		}
 		for _, vmiMigration := range vmiMigrations {
-			controller.migrationIndexer.Add(vmiMigration)
-			key, err := virtcontroller.KeyFunc(vmiMigration)
+			addToQueue, err := fdp.GetBool()
 			if err != nil {
 				return
 			}
-			mockQueue.Add(key)
-			_, err = virtClientset.KubevirtV1().VirtualMachineInstanceMigrations(vmiMigration.Namespace).Create(context.Background(), vmiMigration, metav1.CreateOptions{})
-			if err != nil {
-				return
+			if addToQueue {
+				key, err := virtcontroller.KeyFunc(vmiMigration)
+				if err != nil {
+					return
+				}
+				mockQueue.Add(key)
+			} else {
+				_, err = virtClientset.KubevirtV1().VirtualMachineInstanceMigrations(vmiMigration.Namespace).Create(context.Background(), vmiMigration, metav1.CreateOptions{})
+				if err != nil {
+					return
+				}
+				virtClient.EXPECT().VirtualMachineInstanceMigration(vmiMigration.Namespace).Return(virtClientset.KubevirtV1().VirtualMachineInstanceMigrations(vmiMigration.Namespace)).AnyTimes()
 			}
 		}
 		for _, node := range nodes {
@@ -182,23 +279,37 @@ func FuzzExecute(f *testing.F) {
 			}
 		}
 		for _, pdb := range pdbs {
-			err := controller.pdbIndexer.Add(pdb)
+			addToStore, err := fdp.GetBool()
 			if err != nil {
 				return
 			}
-			_, err = kubeClient.PolicyV1().PodDisruptionBudgets(pdb.Namespace).Create(context.Background(), pdb, metav1.CreateOptions{})
-			if err != nil {
-				return
+			if addToStore {
+				err := controller.pdbIndexer.Add(pdb)
+				if err != nil {
+					return
+				}
+			} else {
+				_, err = kubeClient.PolicyV1().PodDisruptionBudgets(pdb.Namespace).Create(context.Background(), pdb, metav1.CreateOptions{})
+				if err != nil {
+					return
+				}
 			}
 		}
 		for _, mp := range mps {
-			err := controller.migrationPolicyStore.Add(mp)
+			addToStore, err := fdp.GetBool()
 			if err != nil {
 				return
 			}
-			_, err = virtClientset.MigrationsV1alpha1().MigrationPolicies().Create(context.Background(), mp, metav1.CreateOptions{})
-			if err != nil {
-				return
+			if addToStore {
+				err := controller.migrationPolicyStore.Add(mp)
+				if err != nil {
+					return
+				}
+			} else {
+				_, err = virtClientset.MigrationsV1alpha1().MigrationPolicies().Create(context.Background(), mp, metav1.CreateOptions{})
+				if err != nil {
+					return
+				}
 			}
 		}
 		if mockQueue.Len() == 0 {
