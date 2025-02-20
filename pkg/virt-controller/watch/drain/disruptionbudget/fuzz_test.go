@@ -1,14 +1,16 @@
 package disruptionbudget
 
 import (
+	stdruntime "runtime"
 	"testing"
 
 	gfh "github.com/AdaLogics/go-fuzz-headers"
 	"github.com/golang/mock/gomock"
+	"k8s.io/apimachinery/pkg/util/rand"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	policyv1 "k8s.io/api/policy/v1"
 	k8sTesting "k8s.io/client-go/testing"
-	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/kubernetes/fake"
 	corev1 "k8s.io/api/core/v1"
@@ -16,16 +18,52 @@ import (
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	"k8s.io/client-go/tools/cache"
+	virtController "kubevirt.io/kubevirt/pkg/controller"
 	framework "k8s.io/client-go/tools/cache/testing"
+	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
 	"kubevirt.io/kubevirt/pkg/testutils"
 )
 
 var (
 	maxResources = 3
+	kvObjectNamespace = "kubevirt"
+	kvObjectName      = "kubevirt"
 )
 
-// FuzzExecute add up to 3 XXXXXXXXXXXXXXX
+func NewFakeClusterConfigUsingKV(kv *v1.KubeVirt) (*virtconfig.ClusterConfig, cache.SharedIndexInformer, cache.Store, *framework.FakeControllerSource, *framework.FakeControllerSource) {
+	return NewFakeClusterConfigUsingKVWithCPUArch(kv, stdruntime.GOARCH)
+}
+
+func NewFakeClusterConfigUsingKVWithCPUArch(kv *v1.KubeVirt, CPUArch string) (*virtconfig.ClusterConfig, cache.SharedIndexInformer, cache.Store, *framework.FakeControllerSource, *framework.FakeControllerSource) {
+	kv.ResourceVersion = rand.String(10)
+	kv.Status.Phase = "Deployed"
+	crdInformer, cs1 := testutils.NewFakeInformerFor(&extv1.CustomResourceDefinition{})
+	kubeVirtInformer, cs2 := testutils.NewFakeInformerFor(&v1.KubeVirt{})
+
+	kubeVirtInformer.GetStore().Add(kv)
+
+	AddDataVolumeAPI(crdInformer)
+	cfg, _ := virtconfig.NewClusterConfigWithCPUArch(crdInformer, kubeVirtInformer, kvObjectNamespace, CPUArch)
+	return cfg, crdInformer, kubeVirtInformer.GetStore(), cs1, cs2
+}
+
+func AddDataVolumeAPI(crdInformer cache.SharedIndexInformer) {
+	crdInformer.GetStore().Add(&extv1.CustomResourceDefinition{
+		Spec: extv1.CustomResourceDefinitionSpec{
+			Names: extv1.CustomResourceDefinitionNames{
+				Kind: "DataVolume",
+			},
+		},
+	})
+}
+
+func NewFakeClusterConfigUsingKVConfig(kv *v1.KubeVirt) (*virtconfig.ClusterConfig, cache.SharedIndexInformer, cache.Store, *framework.FakeControllerSource, *framework.FakeControllerSource) {
+	return NewFakeClusterConfigUsingKV(kv)
+}
+
+// FuzzExecute add up to 3 resources
 // to the context and then runs the controller.
 func FuzzExecute(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte,
@@ -78,54 +116,54 @@ func FuzzExecute(f *testing.F) {
 			return
 		}
 
-		var vmiInformer cache.SharedIndexInformer
-		var pdbInformer cache.SharedIndexInformer
-		var podInformer cache.SharedIndexInformer
-		var pdbSource *framework.FakeControllerSource
-		var vmimInformer cache.SharedIndexInformer
-		var vmiSource *framework.FakeControllerSource
-		var recorder *record.FakeRecorder
-		var mockQueue *testutils.MockWorkQueue[string]
-		var kubeClient *fake.Clientset
-		var pdbFeeder *testutils.PodDisruptionBudgetFeeder[string]
-		var vmiFeeder *testutils.VirtualMachineFeeder[string]
-		var config *virtconfig.ClusterConfig
-		var virtClient *kubecli.MockKubevirtClient
-		syncCaches := func(stop chan struct{}) {
-			go vmiInformer.Run(stop)
-			go pdbInformer.Run(stop)
-			go podInformer.Run(stop)
-			go vmimInformer.Run(stop)
+		ctrl := gomock.NewController(t)
+		virtClient := kubecli.NewMockKubevirtClient(ctrl)
+		vmiInformer, vmiSource := testutils.NewFakeInformerFor(&v1.VirtualMachineInstance{})
+		pdbInformer, pdbSource := testutils.NewFakeInformerFor(&policyv1.PodDisruptionBudget{})
+		vmimInformer, vmimSource := testutils.NewFakeInformerFor(&v1.VirtualMachineInstanceMigration{})
+		podInformer, podSource := testutils.NewFakeInformerFor(&corev1.Pod{})
+		recorder := record.NewFakeRecorder(100)
+		recorder.IncludeObject = true
 
-			cache.WaitForCacheSync(stop,
-				vmiInformer.HasSynced,
-				pdbInformer.HasSynced,
-				podInformer.HasSynced,
-				vmimInformer.HasSynced,
-			)
+		kv := &v1.KubeVirt{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      kvObjectName,
+				Namespace: kvObjectNamespace,
+			},
+			Spec: v1.KubeVirtSpec{
+				Configuration: v1.KubeVirtConfiguration{},
+			},
+			Status: v1.KubeVirtStatus{
+				DefaultArchitecture: stdruntime.GOARCH,
+				Phase:               "Deployed",
+			},
 		}
 
-
-		stop := make(chan struct{})
-		defer close(stop)
-		ctrl := gomock.NewController(t)
-		virtClient = kubecli.NewMockKubevirtClient(ctrl)
-		vmiInformer, vmiSource = testutils.NewFakeInformerFor(&v1.VirtualMachineInstance{})
-		pdbInformer, pdbSource = testutils.NewFakeInformerFor(&policyv1.PodDisruptionBudget{})
-		vmimInformer, _ = testutils.NewFakeInformerFor(&v1.VirtualMachineInstanceMigration{})
-		podInformer, _ = testutils.NewFakeInformerFor(&corev1.Pod{})
-		recorder = record.NewFakeRecorder(100)
-		recorder.IncludeObject = true
-		config, _, _ = testutils.NewFakeClusterConfigUsingKVConfig(&v1.KubeVirtConfiguration{})
+		config, crdInformer, kubeVirtInformerStore, cs1, cs2 := NewFakeClusterConfigUsingKVConfig(kv)
+		defer cs1.Shutdown()
+		defer cs2.Shutdown()
+		defer kubeVirtInformerStore.Delete(kv)
+		defer func(){
+				for _, obj := range crdInformer.GetStore().List() {
+				err := crdInformer.GetStore().Delete(obj)
+				if err != nil {
+					panic(err)
+				}
+			}
+		}()
+		defer vmiSource.Shutdown()
+		defer pdbSource.Shutdown()
+		defer vmimSource.Shutdown()
+		defer podSource.Shutdown()
 
 		controller, _ := NewDisruptionBudgetController(vmiInformer, pdbInformer, podInformer, vmimInformer, recorder, virtClient, config)
-		mockQueue = testutils.NewMockWorkQueue(controller.Queue)
+		// Shut down default controller queue to avoid memory leak
+		controller.Queue.ShutDown()
+		mockQueue := testutils.NewMockWorkQueue(controller.Queue)
 		controller.Queue = mockQueue
-		pdbFeeder = testutils.NewPodDisruptionBudgetFeeder(mockQueue, pdbSource)
-		vmiFeeder = testutils.NewVirtualMachineFeeder(mockQueue, vmiSource)
 
 		// Set up mock client
-		kubeClient = fake.NewSimpleClientset()
+		kubeClient := fake.NewSimpleClientset()
 		virtClient.EXPECT().CoreV1().Return(kubeClient.CoreV1()).AnyTimes()
 		virtClient.EXPECT().PolicyV1().Return(kubeClient.PolicyV1()).AnyTimes()
 
@@ -133,11 +171,15 @@ func FuzzExecute(f *testing.F) {
 		kubeClient.Fake.PrependReactor("*", "*", func(action k8sTesting.Action) (handled bool, obj runtime.Object, err error) {
 			return true, nil, nil
 		})
-		syncCaches(stop)
 
 		// Add the resources to the context
 		for _, vmi := range vmis {
-			go vmiFeeder.Add(vmi)
+			key, err := virtController.KeyFunc(vmi)
+			if err != nil {
+				continue
+			}
+			controller.Queue.Add(key)
+			vmiSource.Add(vmi)
 		}
 		for _, vmiMigration := range vmiMigrations {
 			err := vmimInformer.GetIndexer().Add(vmiMigration)
@@ -152,7 +194,12 @@ func FuzzExecute(f *testing.F) {
 			}
 		}
 		for _, pdb := range pdbs {
-			go pdbFeeder.Add(pdb)
+			key, err := virtController.KeyFunc(pdb)
+			if err != nil {
+				continue
+			}
+			controller.Queue.Add(key)
+			pdbSource.Add(pdb)
 		}
 		if controller.Queue.Len() == 0 {
 			return
