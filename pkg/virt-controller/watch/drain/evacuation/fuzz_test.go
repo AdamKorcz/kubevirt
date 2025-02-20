@@ -7,26 +7,27 @@ import (
 	gfh "github.com/AdaLogics/go-fuzz-headers"
 	"github.com/golang/mock/gomock"
 	k8sv1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/kubernetes/fake"
 	k8sTesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
-	"k8s.io/apimachinery/pkg/util/rand"
+	framework "k8s.io/client-go/tools/cache/testing"
 	"k8s.io/client-go/tools/record"
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
-	virtController "kubevirt.io/kubevirt/pkg/controller"
 	kubevirtfake "kubevirt.io/client-go/kubevirt/fake"
-	framework "k8s.io/client-go/tools/cache/testing"
-	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+
+	virtController "kubevirt.io/kubevirt/pkg/controller"
+	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 
 	"kubevirt.io/kubevirt/pkg/testutils"
 )
 
 var (
-	maxResources = 4
+	maxResources      = 4
 	kvObjectNamespace = "kubevirt"
 	kvObjectName      = "kubevirt"
 )
@@ -112,7 +113,7 @@ func FuzzExecute(f *testing.F) {
 			migrations = append(migrations, migration)
 		}
 
-		if len(vmis) + len(nodes) + len(pods) + len(migrations) == 0 {
+		if len(vmis)+len(nodes)+len(pods)+len(migrations) == 0 {
 			return
 		}
 
@@ -155,8 +156,8 @@ func FuzzExecute(f *testing.F) {
 		defer cs1.Shutdown()
 		defer cs2.Shutdown()
 		defer kubeVirtInformerStore.Delete(kv)
-		defer func(){
-				for _, obj := range crdInformer.GetStore().List() {
+		defer func() {
+			for _, obj := range crdInformer.GetStore().List() {
 				err := crdInformer.GetStore().Delete(obj)
 				if err != nil {
 					panic(err)
@@ -233,7 +234,6 @@ func FuzzExecute(f *testing.F) {
 			return
 		}
 		panic("Here")
-
 
 		// Run the controller
 		controller.Execute()

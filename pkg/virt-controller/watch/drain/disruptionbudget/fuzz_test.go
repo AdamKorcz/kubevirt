@@ -6,28 +6,29 @@ import (
 
 	gfh "github.com/AdaLogics/go-fuzz-headers"
 	"github.com/golang/mock/gomock"
-	"k8s.io/apimachinery/pkg/util/rand"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	policyv1 "k8s.io/api/policy/v1"
-	k8sTesting "k8s.io/client-go/testing"
-	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/kubernetes/fake"
 	corev1 "k8s.io/api/core/v1"
 	k8sv1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/client-go/kubernetes/fake"
+	k8sTesting "k8s.io/client-go/testing"
+	"k8s.io/client-go/tools/cache"
+	framework "k8s.io/client-go/tools/cache/testing"
+	"k8s.io/client-go/tools/record"
 	v1 "kubevirt.io/api/core/v1"
 	"kubevirt.io/client-go/kubecli"
-	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
-	"k8s.io/client-go/tools/cache"
+
 	virtController "kubevirt.io/kubevirt/pkg/controller"
-	framework "k8s.io/client-go/tools/cache/testing"
-	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
 
 	"kubevirt.io/kubevirt/pkg/testutils"
 )
 
 var (
-	maxResources = 3
+	maxResources      = 3
 	kvObjectNamespace = "kubevirt"
 	kvObjectName      = "kubevirt"
 )
@@ -67,10 +68,10 @@ func NewFakeClusterConfigUsingKVConfig(kv *v1.KubeVirt) (*virtconfig.ClusterConf
 // to the context and then runs the controller.
 func FuzzExecute(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte,
-							  numberOfVMIs,
-							  numberOfVMIMigrations,
-							  numberOfPods,
-							  numberOfPDBs uint8) {
+		numberOfVMIs,
+		numberOfVMIMigrations,
+		numberOfPods,
+		numberOfPDBs uint8) {
 		fdp := gfh.NewConsumer(data)
 
 		vmis := make([]*v1.VirtualMachineInstance, 0)
@@ -112,7 +113,7 @@ func FuzzExecute(f *testing.F) {
 			}
 			pdbs = append(pdbs, pdb)
 		}
-		if len(vmis) + len(pods) + len(vmiMigrations) + len(pdbs) < 3 {
+		if len(vmis)+len(pods)+len(vmiMigrations)+len(pdbs) < 3 {
 			return
 		}
 
@@ -143,8 +144,8 @@ func FuzzExecute(f *testing.F) {
 		defer cs1.Shutdown()
 		defer cs2.Shutdown()
 		defer kubeVirtInformerStore.Delete(kv)
-		defer func(){
-				for _, obj := range crdInformer.GetStore().List() {
+		defer func() {
+			for _, obj := range crdInformer.GetStore().List() {
 				err := crdInformer.GetStore().Delete(obj)
 				if err != nil {
 					panic(err)
