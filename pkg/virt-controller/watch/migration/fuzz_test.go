@@ -209,7 +209,7 @@ func FuzzExecute(f *testing.F) {
 			config,
 		)
 		// Wrap our workqueue to have a way to detect when we are done processing updates
-		mockQueue := testutils.NewMockWorkQueue(controller.Queue)
+		mockQueue := testutils.NewMockPriorityQueue(controller.Queue)
 		controller.Queue.ShutDown()
 		controller.Queue = mockQueue
 
