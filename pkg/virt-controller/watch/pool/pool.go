@@ -39,7 +39,6 @@ import (
 
 	"kubevirt.io/kubevirt/pkg/apimachinery/patch"
 	"kubevirt.io/kubevirt/pkg/controller"
-	"kubevirt.io/kubevirt/pkg/testutils"
 	traceUtils "kubevirt.io/kubevirt/pkg/util/trace"
 	"kubevirt.io/kubevirt/pkg/virt-controller/watch/common"
 )
@@ -1670,17 +1669,4 @@ func (c *Controller) handlePoolDeletion(pool *poolv1.VirtualMachinePool, vms []*
 	}
 
 	return nil
-}
-
-// These utils are needed for the fuzzer
-func ShutdownCtrlQueue(ctrl *Controller) {
-	ctrl.queue.ShutDown()
-}
-
-func SetQueue(ctrl *Controller, newQueue *testutils.MockWorkQueue[string]) {
-	ctrl.queue = newQueue
-}
-
-func GetQueue(ctrl *Controller) workqueue.TypedRateLimitingInterface[string] {
-	return ctrl.queue
 }
