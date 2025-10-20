@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/golang/mock/gomock"
+	"go.uber.org/mock/gomock"
 	admissionv1 "k8s.io/api/admission/v1"
 	"kubevirt.io/client-go/kubecli"
 	"kubevirt.io/client-go/kubevirt/fake"
@@ -70,7 +70,8 @@ func FuzzWebhookAdmitters(f *testing.F) {
 		case 3:
 			ServeVMIPreset(resp, req)
 		case 4:
-			ServeMigrationCreate(resp, req, virtClient)
+			var clusterConfig *virtconfig.ClusterConfig
+			ServeMigrationCreate(resp, req, clusterConfig, virtClient)
 		case 5:
 			ServeMigrationUpdate(resp, req)
 		case 6:
