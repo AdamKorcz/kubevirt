@@ -39,9 +39,12 @@ import (
 	kubevirtfake "kubevirt.io/client-go/kubevirt/fake"
 	"kubevirt.io/client-go/log"
 
+	kvcontroller "kubevirt.io/kubevirt/pkg/controller"
+
 	fuzz "github.com/google/gofuzz"
 
 	"kubevirt.io/kubevirt/pkg/testutils"
+	nodecontroller "kubevirt.io/kubevirt/pkg/virt-controller/watch/node"
 )
 
 var (
@@ -96,7 +99,7 @@ func FuzzExecute(f *testing.F) {
 		recorder := record.NewFakeRecorder(100)
 		recorder.IncludeObject = true
 
-		controller, _ := NewController(virtClient, nodeInformer, vmiInformer, recorder)
+		controller, _ := nodecontroller.NewController(virtClient, nodeInformer, vmiInformer, recorder)
 
 		// We need to shut down the queue to avoid excessive memory usage
 		controller.Queue.ShutDown()
@@ -104,7 +107,7 @@ func FuzzExecute(f *testing.F) {
 		mockQueue := testutils.NewMockWorkQueue(controller.Queue)
 		controller.Queue = mockQueue
 
-		controller.recheckInterval = 10 * time.Millisecond
+		nodecontroller.SetRecheckInternal(controller, 10*time.Millisecond)
 
 		// Set up mock client
 		virtClient.EXPECT().VirtualMachineInstance(metav1.NamespaceAll).Return(fakeVirtClient.KubevirtV1().VirtualMachineInstances(metav1.NamespaceAll)).AnyTimes()
@@ -122,7 +125,11 @@ func FuzzExecute(f *testing.F) {
 
 		// Add the resources to the context
 		for _, node := range nodes {
-			controller.enqueueNode(node)
+			key, err := kvcontroller.KeyFunc(node)
+			if err != nil {
+				continue
+			}
+			controller.Queue.Add(key)
 		}
 		for _, vmi := range vmis {
 			// Either add a VMI to the queue or create it
@@ -131,7 +138,7 @@ func FuzzExecute(f *testing.F) {
 			fdp.Fuzz(&addToQueue)
 			fdp.Fuzz(&create)
 			if addToQueue {
-				controller.addVirtualMachine(vmi)
+				controller.Queue.Add(vmi.Status.NodeName)
 			}
 			if create {
 				fakeVirtClient.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Create(ctx, vmi, metav1.CreateOptions{})
