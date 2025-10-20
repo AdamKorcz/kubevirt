@@ -7,8 +7,7 @@ import (
 	"testing"
 	"time"
 
-	gfh "github.com/AdaLogics/go-fuzz-headers"
-	"github.com/golang/mock/gomock"
+	"go.uber.org/mock/gomock"
 	k8sv1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -21,37 +20,35 @@ import (
 	kubevirtfake "kubevirt.io/client-go/kubevirt/fake"
 	"kubevirt.io/client-go/log"
 
+	fuzz "github.com/google/gofuzz"
+
 	"kubevirt.io/kubevirt/pkg/testutils"
 )
 
 var (
-	maxResources = 3
+	maxResources = 10
 )
 
-// FuzzExecute add up to 3 nodes and vmis
+// FuzzExecute add up to 10 nodes and vmis
 // to the context and then runs the controller.
 func FuzzExecute(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte, numberOfVMs, numberOfVMI uint8) {
-		fdp := gfh.NewConsumer(data)
+		fdp := fuzz.NewFromGoFuzz(data)
 
 		// Create nodes and vmis
 		nodes := make([]*k8sv1.Node, 0)
 		for _ = range int(numberOfVMs) % maxResources {
 			node := &k8sv1.Node{}
-			err := fdp.GenerateStruct(node)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(node)
+
 			nodes = append(nodes, node)
 		}
 
 		vmis := make([]*virtv1.VirtualMachineInstance, 0)
 		for _ = range int(numberOfVMI) % maxResources {
 			vmi := &virtv1.VirtualMachineInstance{}
-			err := fdp.GenerateStruct(vmi)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(vmi)
+
 			vmis = append(vmis, vmi)
 		}
 		// There is no point in continuing
@@ -110,17 +107,15 @@ func FuzzExecute(f *testing.F) {
 		}
 		for _, vmi := range vmis {
 			// Either add a VMI to the queue or create it
-			addToQueue, err := fdp.GetBool()
-			if err != nil {
-				return
-			}
+			var addToQueue bool
+			var create bool
+			fdp.Fuzz(&addToQueue)
+			fdp.Fuzz(&create)
 			if addToQueue {
 				controller.addVirtualMachine(vmi)
-			} else {
-				_, err := fakeVirtClient.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Create(ctx, vmi, metav1.CreateOptions{})
-				if err != nil {
-					return
-				}
+			}
+			if create {
+				fakeVirtClient.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Create(ctx, vmi, metav1.CreateOptions{})
 			}
 		}
 
