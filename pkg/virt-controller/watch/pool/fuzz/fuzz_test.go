@@ -1,10 +1,29 @@
-package pool
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
+package fuzz
 
 import (
 	"testing"
 
-	gfh "github.com/AdaLogics/go-fuzz-headers"
-	"github.com/golang/mock/gomock"
+	fuzz "github.com/google/gofuzz"
+	"go.uber.org/mock/gomock"
 	appsv1 "k8s.io/api/apps/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -19,62 +38,51 @@ import (
 
 	virtcontroller "kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/testutils"
+	"kubevirt.io/kubevirt/pkg/virt-controller/watch/pool"
 )
 
 var (
 	maxResources = 3
 )
 
-// FuzzExecute add up to 3 XXXXXXXXXXXXXXX
-// to the context and then runs the controller.
+// FuzzExecute adds random resources to the context
+// and then runs the controller.
 func FuzzExecute(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte, numberOfCRs, numberOfVMs uint8) {
-		fdp := gfh.NewConsumer(data)
+		fdp := fuzz.NewFromGoFuzz(data)
 
 		crs := make([]*appsv1.ControllerRevision, 0)
 		for _ = range int(numberOfCRs) % maxResources {
-			cr := &appsv1.ControllerRevision{}
-			err := fdp.GenerateStruct(cr)
-			if err != nil {
-				return
-			}
+			var cr *appsv1.ControllerRevision
+			fdp.Fuzz(cr)
 			crs = append(crs, cr)
 		}
 
 		vms := make([]*v1.VirtualMachine, 0)
 		for _ = range int(numberOfVMs) % maxResources {
-			vm := &v1.VirtualMachine{}
-			err := fdp.GenerateStruct(vm)
-			if err != nil {
-				return
-			}
+			var vm *v1.VirtualMachine
+			fdp.Fuzz(vm)
 			vms = append(vms, vm)
 		}
 
 		vmis := make([]*v1.VirtualMachineInstance, 0)
 		for _ = range int(numberOfVMs) % maxResources {
-			vmi := &v1.VirtualMachineInstance{}
-			err := fdp.GenerateStruct(vmi)
-			if err != nil {
-				return
-			}
+			var vmi *v1.VirtualMachineInstance
+			fdp.Fuzz(vmi)
 			vmis = append(vmis, vmi)
 		}
 
 		vmPools := make([]*poolv1.VirtualMachinePool, 0)
 		for _ = range int(numberOfVMs) % maxResources {
-			vmPool := &poolv1.VirtualMachinePool{}
-			err := fdp.GenerateStruct(vmPool)
-			if err != nil {
-				return
-			}
+			var vmPool *poolv1.VirtualMachinePool
+			fdp.Fuzz(vmPool)
 			vmPools = append(vmPools, vmPool)
 		}
 		// There is no point in continuing
 		// if we have not created any resources.
-		/*if len(vms) == 0 || len(vms) == 0 || len(vmis) == 0 || len(vmPools) == 0 {
+		if len(vms)+len(vms)+len(vmis)+len(vmPools) < 3 {
 			return
-		}*/
+		}
 
 		virtClient := kubecli.NewMockKubevirtClient(gomock.NewController(t))
 
@@ -96,18 +104,67 @@ func FuzzExecute(f *testing.F) {
 			},
 		})
 
-		controller, _ := NewController(virtClient,
+		controller, _ := pool.NewController(virtClient,
 			vmiInformer,
 			vmInformer,
 			poolInformer,
 			crInformer,
 			recorder,
 			uint(10))
-		// Wrap our workqueue to have a way to detect when we are done processing updates
-		mockQueue := testutils.NewMockWorkQueue(controller.queue)
-		controller.queue = mockQueue
-
 		fakeVirtClient := kubevirtfake.NewSimpleClientset()
+		mockQueue := testutils.NewMockWorkQueue(pool.GetQueue(controller))
+		// Add the resources to the context
+		for _, cr := range crs {
+			if cr == nil {
+				continue
+			}
+			crInformer.GetIndexer().Add(cr)
+			key, err := virtcontroller.KeyFunc(cr)
+			if err != nil {
+				return
+			}
+			mockQueue.Add(key)
+		}
+		for _, vm := range vms {
+			if vm == nil {
+				continue
+			}
+			vmInformer.GetIndexer().Add(vm)
+			key, err := virtcontroller.KeyFunc(vm)
+			if err != nil {
+				return
+			}
+			mockQueue.Add(key)
+		}
+		for _, vmi := range vmis {
+			if vmi == nil {
+				continue
+			}
+			vmiInformer.GetStore().Add(vmi)
+			key, err := virtcontroller.KeyFunc(vmi)
+			if err != nil {
+				return
+			}
+			mockQueue.Add(key)
+		}
+		for _, vmPool := range vmPools {
+			if vmPool == nil {
+				continue
+			}
+			poolInformer.GetIndexer().Add(vmPool)
+			key, err := virtcontroller.KeyFunc(vmPool)
+			if err != nil {
+				return
+			}
+			mockQueue.Add(key)
+			virtClient.EXPECT().VirtualMachinePool(vmPool.Namespace).Return(fakeVirtClient.PoolV1alpha1().VirtualMachinePools(vmPool.Namespace)).AnyTimes()
+
+		}
+		if mockQueue.Len() == 0 {
+			return
+		}
+		pool.ShutdownCtrlQueue(controller)
+		pool.SetQueue(controller, mockQueue)
 
 		// Set up mock client
 		virtClient.EXPECT().VirtualMachineInstance(metav1.NamespaceDefault).Return(fakeVirtClient.KubevirtV1().VirtualMachineInstances(metav1.NamespaceDefault)).AnyTimes()
@@ -122,45 +179,6 @@ func FuzzExecute(f *testing.F) {
 			return true, nil, nil
 		})
 		virtClient.EXPECT().AppsV1().Return(k8sClient.AppsV1()).AnyTimes()
-
-		// Add the resources to the context
-		for _, cr := range crs {
-			controller.revisionIndexer.Add(cr)
-			key, err := virtcontroller.KeyFunc(cr)
-			if err != nil {
-				return
-			}
-			mockQueue.Add(key)
-		}
-		for _, vm := range vms {
-			controller.vmIndexer.Add(vm)
-			key, err := virtcontroller.KeyFunc(vm)
-			if err != nil {
-				return
-			}
-			mockQueue.Add(key)
-		}
-		for _, vmi := range vmis {
-			controller.vmiStore.Add(vmi)
-			key, err := virtcontroller.KeyFunc(vmi)
-			if err != nil {
-				return
-			}
-			mockQueue.Add(key)
-		}
-		for _, vmPool := range vmPools {
-			controller.poolIndexer.Add(vmPool)
-			key, err := virtcontroller.KeyFunc(vmPool)
-			if err != nil {
-				return
-			}
-			mockQueue.Add(key)
-			virtClient.EXPECT().VirtualMachinePool(vmPool.Namespace).Return(fakeVirtClient.PoolV1alpha1().VirtualMachinePools(vmPool.Namespace)).AnyTimes()
-
-		}
-		if mockQueue.Len() == 0 {
-			return
-		}
 
 		// Run the controller
 		controller.Execute()

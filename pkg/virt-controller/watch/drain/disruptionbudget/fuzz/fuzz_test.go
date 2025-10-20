@@ -1,16 +1,34 @@
-package disruptionbudget
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
+package fuzz
 
 import (
 	stdruntime "runtime"
 	"testing"
 
-	gfh "github.com/AdaLogics/go-fuzz-headers"
-	"github.com/golang/mock/gomock"
+	fuzz "github.com/google/gofuzz"
+	"go.uber.org/mock/gomock"
 	corev1 "k8s.io/api/core/v1"
 	k8sv1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/kubernetes/fake"
@@ -23,6 +41,7 @@ import (
 
 	virtController "kubevirt.io/kubevirt/pkg/controller"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	"kubevirt.io/kubevirt/pkg/virt-controller/watch/drain/disruptionbudget"
 
 	"kubevirt.io/kubevirt/pkg/testutils"
 )
@@ -72,45 +91,33 @@ func FuzzExecute(f *testing.F) {
 		numberOfVMIMigrations,
 		numberOfPods,
 		numberOfPDBs uint8) {
-		fdp := gfh.NewConsumer(data)
+		fdp := fuzz.NewFromGoFuzz(data)
 
 		vmis := make([]*v1.VirtualMachineInstance, 0)
 		for _ = range int(numberOfVMIs) % maxResources {
 			vmi := &v1.VirtualMachineInstance{}
-			err := fdp.GenerateStruct(vmi)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(vmi)
 			vmis = append(vmis, vmi)
 		}
 
 		pods := make([]*k8sv1.Pod, 0)
 		for _ = range int(numberOfPods) % maxResources {
 			pod := &k8sv1.Pod{}
-			err := fdp.GenerateStruct(pod)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(pod)
 			pods = append(pods, pod)
 		}
 
 		vmiMigrations := make([]*v1.VirtualMachineInstanceMigration, 0)
 		for _ = range int(numberOfVMIMigrations) % maxResources {
 			vmiMigration := &v1.VirtualMachineInstanceMigration{}
-			err := fdp.GenerateStruct(vmiMigration)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(vmiMigration)
 			vmiMigrations = append(vmiMigrations, vmiMigration)
 		}
 
 		pdbs := make([]*policyv1.PodDisruptionBudget, 0)
 		for _ = range int(numberOfPDBs) % maxResources {
 			pdb := &policyv1.PodDisruptionBudget{}
-			err := fdp.GenerateStruct(pdb)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(pdb)
 			pdbs = append(pdbs, pdb)
 		}
 		if len(vmis)+len(pods)+len(vmiMigrations)+len(pdbs) < 3 {
@@ -126,38 +133,17 @@ func FuzzExecute(f *testing.F) {
 		recorder := record.NewFakeRecorder(100)
 		recorder.IncludeObject = true
 
-		kv := &v1.KubeVirt{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      kvObjectName,
-				Namespace: kvObjectNamespace,
-			},
-			Spec: v1.KubeVirtSpec{
-				Configuration: v1.KubeVirtConfiguration{},
-			},
-			Status: v1.KubeVirtStatus{
-				DefaultArchitecture: stdruntime.GOARCH,
-				Phase:               "Deployed",
-			},
-		}
-
-		config, crdInformer, kubeVirtInformerStore, cs1, cs2 := NewFakeClusterConfigUsingKVConfig(kv)
-		defer cs1.Shutdown()
-		defer cs2.Shutdown()
-		defer kubeVirtInformerStore.Delete(kv)
-		defer func() {
-			for _, obj := range crdInformer.GetStore().List() {
-				err := crdInformer.GetStore().Delete(obj)
-				if err != nil {
-					panic(err)
-				}
-			}
-		}()
 		defer vmiSource.Shutdown()
 		defer pdbSource.Shutdown()
 		defer vmimSource.Shutdown()
 		defer podSource.Shutdown()
 
-		controller, _ := NewDisruptionBudgetController(vmiInformer, pdbInformer, podInformer, vmimInformer, recorder, virtClient, config)
+		controller, _ := disruptionbudget.NewDisruptionBudgetController(vmiInformer,
+			pdbInformer,
+			podInformer,
+			vmimInformer,
+			recorder,
+			virtClient)
 		// Shut down default controller queue to avoid memory leak
 		controller.Queue.ShutDown()
 		mockQueue := testutils.NewMockWorkQueue(controller.Queue)

@@ -1,4 +1,23 @@
-package migration
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
+package fuzz
 
 import (
 	"bufio"
@@ -7,8 +26,8 @@ import (
 	stdruntime "runtime"
 	"testing"
 
-	gfh "github.com/AdaLogics/go-fuzz-headers"
-	"github.com/golang/mock/gomock"
+	fuzz "github.com/google/gofuzz"
+	"go.uber.org/mock/gomock"
 	k8sv1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	storagev1 "k8s.io/api/storage/v1"
@@ -32,6 +51,7 @@ import (
 
 	virtcontroller "kubevirt.io/kubevirt/pkg/controller"
 	"kubevirt.io/kubevirt/pkg/testutils"
+	"kubevirt.io/kubevirt/pkg/virt-controller/watch/migration"
 )
 
 var (
@@ -72,7 +92,7 @@ func NewFakeClusterConfigUsingKVConfig(kv *v1.KubeVirt) (*virtconfig.ClusterConf
 	return NewFakeClusterConfigUsingKV(kv)
 }
 
-// FuzzExecute add up to 3 XXXXXXXXXXXXXXX
+// FuzzExecute addd up to 3 resources
 // to the context and then runs the controller.
 func FuzzExecute(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte,
@@ -81,55 +101,40 @@ func FuzzExecute(f *testing.F) {
 		numberOfNodes,
 		numberOfPDBs,
 		numberOfMPs uint8) {
-		fdp := gfh.NewConsumer(data)
+		fdp := fuzz.NewFromGoFuzz(data)
 
 		vmis := make([]*v1.VirtualMachineInstance, 0)
 		for _ = range int(numberOfVMIs) % maxResources {
 			vmi := &v1.VirtualMachineInstance{}
-			err := fdp.GenerateStruct(vmi)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(vmi)
 			vmis = append(vmis, vmi)
 		}
 
 		vmiMigrations := make([]*v1.VirtualMachineInstanceMigration, 0)
 		for _ = range int(numberOfVMIMigrations) % maxResources {
 			vmiMigration := &v1.VirtualMachineInstanceMigration{}
-			err := fdp.GenerateStruct(vmiMigration)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(vmiMigration)
 			vmiMigrations = append(vmiMigrations, vmiMigration)
 		}
 
 		nodes := make([]*k8sv1.Node, 0)
 		for _ = range int(numberOfNodes) % maxResources {
 			node := &k8sv1.Node{}
-			err := fdp.GenerateStruct(node)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(node)
 			nodes = append(nodes, node)
 		}
 
 		pdbs := make([]*policyv1.PodDisruptionBudget, 0)
 		for _ = range int(numberOfPDBs) % maxResources {
 			pdb := &policyv1.PodDisruptionBudget{}
-			err := fdp.GenerateStruct(pdb)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(pdb)
 			pdbs = append(pdbs, pdb)
 		}
 
 		mps := make([]*migrationsv1.MigrationPolicy, 0)
 		for _ = range int(numberOfMPs) % maxResources {
 			pdb := &migrationsv1.MigrationPolicy{}
-			err := fdp.GenerateStruct(pdb)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(pdb)
 			mps = append(mps, pdb)
 		}
 
@@ -192,7 +197,7 @@ func FuzzExecute(f *testing.F) {
 				}
 			}
 		}()
-		controller, _ := NewController(
+		controller, _ := migration.NewController(
 			services.NewTemplateService("a", 240, "b", "c", "d", "e", "f", pvcInformer.GetStore(), virtClient, config, qemuGid, "g", resourceQuotaInformer.GetStore(), namespaceInformer.GetStore()),
 			vmiInformer,
 			podInformer,
@@ -231,85 +236,79 @@ func FuzzExecute(f *testing.F) {
 			if len(vmi.Labels) == 0 {
 				vmi.Labels = nil
 			}
-			addToQueue, err := fdp.GetBool()
-			if err != nil {
-				return
-			}
+			var addToQueue bool
+			var create bool
+			fdp.Fuzz(&addToQueue)
+			fdp.Fuzz(&create)
 			if addToQueue {
-				controller.vmiStore.Add(vmi)
+				vmiInformer.GetStore().Add(vmi)
 				key, err := virtcontroller.KeyFunc(vmi)
 				if err != nil {
 					return
 				}
 				mockQueue.Add(key)
-			} else {
-				_, err = virtClientset.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Create(context.Background(), vmi, metav1.CreateOptions{})
-				if err != nil {
-					return
-				}
+			}
+			if create {
+				virtClientset.KubevirtV1().VirtualMachineInstances(vmi.Namespace).Create(context.Background(), vmi, metav1.CreateOptions{})
 			}
 		}
 		for _, vmiMigration := range vmiMigrations {
-			addToQueue, err := fdp.GetBool()
-			if err != nil {
-				return
-			}
+
+			var addToQueue bool
+			var create bool
+			fdp.Fuzz(&addToQueue)
+			fdp.Fuzz(&create)
+
 			if addToQueue {
 				key, err := virtcontroller.KeyFunc(vmiMigration)
 				if err != nil {
 					return
 				}
 				mockQueue.Add(key)
-			} else {
-				_, err = virtClientset.KubevirtV1().VirtualMachineInstanceMigrations(vmiMigration.Namespace).Create(context.Background(), vmiMigration, metav1.CreateOptions{})
-				if err != nil {
-					return
-				}
+			}
+			if create {
+				virtClientset.KubevirtV1().VirtualMachineInstanceMigrations(vmiMigration.Namespace).Create(context.Background(), vmiMigration, metav1.CreateOptions{})
 				virtClient.EXPECT().VirtualMachineInstanceMigration(vmiMigration.Namespace).Return(virtClientset.KubevirtV1().VirtualMachineInstanceMigrations(vmiMigration.Namespace)).AnyTimes()
 			}
 		}
 		for _, node := range nodes {
-			err := controller.nodeStore.Add(node)
+			err := nodeInformer.GetStore().Add(node)
 			if err != nil {
 				return
 			}
-			_, err = kubeClient.CoreV1().Nodes().Create(context.Background(), node, metav1.CreateOptions{})
-			if err != nil {
-				return
-			}
+			kubeClient.CoreV1().Nodes().Create(context.Background(), node, metav1.CreateOptions{})
+
 		}
 		for _, pdb := range pdbs {
-			addToStore, err := fdp.GetBool()
-			if err != nil {
-				return
-			}
+			var addToStore bool
+			var create bool
+			fdp.Fuzz(&addToStore)
+			fdp.Fuzz(&create)
+
 			if addToStore {
-				err := controller.pdbIndexer.Add(pdb)
+				err := pdbInformer.GetIndexer().Add(pdb)
 				if err != nil {
 					return
 				}
-			} else {
-				_, err = kubeClient.PolicyV1().PodDisruptionBudgets(pdb.Namespace).Create(context.Background(), pdb, metav1.CreateOptions{})
-				if err != nil {
-					return
-				}
+			}
+			if create {
+				kubeClient.PolicyV1().PodDisruptionBudgets(pdb.Namespace).Create(context.Background(), pdb, metav1.CreateOptions{})
 			}
 		}
 		for _, mp := range mps {
-			addToStore, err := fdp.GetBool()
-			if err != nil {
-				return
-			}
+			var addToStore bool
+			var create bool
+			fdp.Fuzz(&addToStore)
+			fdp.Fuzz(&create)
+
 			if addToStore {
-				err := controller.migrationPolicyStore.Add(mp)
+				err := migrationPolicyInformer.GetStore().Add(mp)
 				if err != nil {
 					return
 				}
-			} else {
-				_, err = virtClientset.MigrationsV1alpha1().MigrationPolicies().Create(context.Background(), mp, metav1.CreateOptions{})
-				if err != nil {
-					return
-				}
+			}
+			if create {
+				virtClientset.MigrationsV1alpha1().MigrationPolicies().Create(context.Background(), mp, metav1.CreateOptions{})
 			}
 		}
 		if mockQueue.Len() == 0 {

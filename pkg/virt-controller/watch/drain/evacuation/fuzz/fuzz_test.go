@@ -1,11 +1,30 @@
-package evacuation
+/*
+ * This file is part of the KubeVirt project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ * Copyright The KubeVirt Authors.
+ *
+ */
+
+package fuzz
 
 import (
 	stdruntime "runtime"
 	"testing"
 
-	gfh "github.com/AdaLogics/go-fuzz-headers"
-	"github.com/golang/mock/gomock"
+	fuzz "github.com/google/gofuzz"
+	"go.uber.org/mock/gomock"
 	k8sv1 "k8s.io/api/core/v1"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,6 +41,7 @@ import (
 
 	virtController "kubevirt.io/kubevirt/pkg/controller"
 	virtconfig "kubevirt.io/kubevirt/pkg/virt-config"
+	"kubevirt.io/kubevirt/pkg/virt-controller/watch/drain/evacuation"
 
 	"kubevirt.io/kubevirt/pkg/testutils"
 )
@@ -63,53 +83,41 @@ func NewFakeClusterConfigUsingKVConfig(kv *v1.KubeVirt) (*virtconfig.ClusterConf
 	return NewFakeClusterConfigUsingKV(kv)
 }
 
-// FuzzExecute add up to 4 resources
-// to the context and then runs the controller.
+// FuzzExecute random resources to the context
+// and then runs the controller.
 func FuzzExecute(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte,
 		numberOfVMIs,
 		numberOfNodes,
 		numberOfPods,
 		numberOfMigrations uint8) {
-		fdp := gfh.NewConsumer(data)
+		fdp := fuzz.NewFromGoFuzz(data)
 
 		vmis := make([]*v1.VirtualMachineInstance, 0)
 		for _ = range int(numberOfVMIs) % maxResources {
 			vmi := &v1.VirtualMachineInstance{}
-			err := fdp.GenerateStruct(vmi)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(vmi)
 			vmis = append(vmis, vmi)
 		}
 
 		nodes := make([]*k8sv1.Node, 0)
 		for _ = range int(numberOfNodes) % maxResources {
 			node := &k8sv1.Node{}
-			err := fdp.GenerateStruct(node)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(node)
 			nodes = append(nodes, node)
 		}
 
 		pods := make([]*k8sv1.Pod, 0)
 		for _ = range int(numberOfPods) % maxResources {
 			pod := &k8sv1.Pod{}
-			err := fdp.GenerateStruct(pod)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(pod)
 			pods = append(pods, pod)
 		}
 
 		migrations := make([]*v1.VirtualMachineInstanceMigration, 0)
 		for _ = range int(numberOfMigrations) % maxResources {
 			migration := &v1.VirtualMachineInstanceMigration{}
-			err := fdp.GenerateStruct(migration)
-			if err != nil {
-				return
-			}
+			fdp.Fuzz(migration)
 			migrations = append(migrations, migration)
 		}
 
@@ -165,7 +173,13 @@ func FuzzExecute(f *testing.F) {
 			}
 		}()
 
-		controller, _ := NewEvacuationController(vmiInformer, migrationInformer, nodeInformer, podInformer, recorder, virtClient, config)
+		controller, _ := evacuation.NewEvacuationController(vmiInformer,
+			migrationInformer,
+			nodeInformer,
+			podInformer,
+			recorder,
+			virtClient,
+			config)
 		controller.Queue.ShutDown()
 		mockQueue := testutils.NewMockWorkQueue(controller.Queue)
 		controller.Queue = mockQueue
@@ -233,7 +247,6 @@ func FuzzExecute(f *testing.F) {
 		if controller.Queue.Len() == 0 {
 			return
 		}
-		panic("Here")
 
 		// Run the controller
 		controller.Execute()
